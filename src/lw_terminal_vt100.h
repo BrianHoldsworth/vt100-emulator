@@ -84,10 +84,15 @@ struct lw_terminal_vt100
     unsigned int top_line; /* Line at the top of the display */
     char         *screen;
     char         *frozen_screen;
+    unsigned char *tattrinfo;
     char         *tabulations;
     unsigned int selected_charset;
     unsigned int modes;
     char         *lines[80];
+    unsigned char *tattrs[80];
+    unsigned char bgclr[80];
+    unsigned char saved_bgclr;
+    unsigned char saved_tattr;
     void         (*master_write)(void *user_data, void *buffer, size_t len);
     void         *user_data;
     pthread_mutex_t mutex;
@@ -97,7 +102,9 @@ struct lw_terminal_vt100 *lw_terminal_vt100_init(void *user_data,
                                      void (*unimplemented)(struct lw_terminal* term_emul,
                                                            char *seq, char chr));
 char lw_terminal_vt100_get(struct lw_terminal_vt100 *vt100, unsigned int x, unsigned int y);
+const char **lw_terminal_vt100_getanslines(struct lw_terminal_vt100 *vt100);
 const char **lw_terminal_vt100_getlines(struct lw_terminal_vt100 *vt100);
+const char **lw_terminal_vt100_getattrs(struct lw_terminal_vt100 *vt100);
 void lw_terminal_vt100_destroy(struct lw_terminal_vt100 *this);
 void lw_terminal_vt100_read_str(struct lw_terminal_vt100 *this, char *buffer);
 

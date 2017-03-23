@@ -44,15 +44,15 @@ OBJ_TEST = $(SRC_TEST:.c=.o)
 CC = gcc
 INCLUDE = src
 DEFINE = _GNU_SOURCE
-CFLAGS = -DNDEBUG -g3 -Wextra -Wstrict-prototypes -Wall -ansi -pedantic -fPIC -I$(INCLUDE)
+CFLAGS = -DNDEBUG -g3 -Wextra -Wstrict-prototypes -Wall -std=c99 -pedantic -fPIC -I$(INCLUDE)
 LIB = -lutil
 RM = rm -f
 
 $(NAME):	$(OBJ)
 		$(CC) --shared $(OBJ) $(LIB) -o $(LINKERNAME)
 
-test:	$(OBJ_TEST)
-		$(CC) $(OBJ_TEST) -L . -l$(NAME) -o test
+test:	$(OBJ_TEST) $(OBJ)
+		$(CC) $(OBJ_TEST) $(OBJ) $(LIB) -o test
 
 python_module:
 		swig -python -threads *.i

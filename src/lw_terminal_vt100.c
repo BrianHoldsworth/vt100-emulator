@@ -26,6 +26,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdio.h>
+#include "clog.h"
 #include "lw_terminal_vt100.h"
 
 static unsigned int get_mode_mask(unsigned int mode)
@@ -190,8 +192,11 @@ static void set(struct lw_terminal_vt100 *headless_term,
 {
     if (y < headless_term->margin_top || y > headless_term->margin_bottom)
         headless_term->frozen_screen[FROZEN_SCREEN_PTR(headless_term, x, y)] = c;
-    else
+    else {
         headless_term->screen[SCREEN_PTR(headless_term, x, y)] = c;
+    }
+    headless_term->bgclr[y] = headless_term->saved_bgclr;
+    headless_term->tattrinfo[SCREEN_PTR(headless_term, x, y)] = headless_term->saved_tattr;
 }
 
 
@@ -426,10 +431,14 @@ static void DECSTBM(struct lw_terminal *term_emul)
 
   Parameter    Parameter Meaning
   0            Attributes off
-  1            Bold or increased intensity
-  4            Underscore
+  1            Increased intensity
+  4            Underline
   5            Blink
   7            Negative (reverse) image
+  30-37        Set text foreground color
+  39           Set default foreground color (7=Gray)
+  40-47        Set text background color
+  49           Set default background color (0=Black)
 
   All other parameter values are ignored.
 
@@ -441,8 +450,50 @@ static void DECSTBM(struct lw_terminal *term_emul)
 */
 static void SGR(struct lw_terminal *term_emul)
 {
-    term_emul = term_emul;
-    /* Just ignore them for now, we are rendering pure text only */
+    struct lw_terminal_vt100 *vt100;
+    unsigned int i, v;
+
+    vt100 = (struct lw_terminal_vt100 *)term_emul->user_data;
+
+    if (term_emul->argc == 0) {
+        vt100->saved_tattr &= 0x0E;
+        return;
+    }
+
+    for (i=0; i<term_emul->argc; ++i) {
+        v = term_emul->argv[i];
+        if (v == 0) {                   /* Default */
+            vt100->saved_tattr &= 0x0E;
+        }
+        else if (v == 1) {              /* Bold/intense */
+            vt100->saved_tattr |= 0x01;
+        }
+        else if (v == 7) {               /* Reverse video */
+            vt100->saved_tattr |= 0x40;
+        }
+        else if (v == 4) {               /* Underline */
+            vt100->saved_tattr |= 0x20;
+        }
+        else if (v == 5) {               /* Blink */
+            vt100->saved_tattr |= 0x10;
+        }
+        else if (v >= 30 && v <= 37) {
+            vt100->saved_tattr &= 0xF1;
+            vt100->saved_tattr |= (((unsigned char)v-30)<<1);
+        }
+        else if (v == 39) {
+            vt100->saved_tattr &= 0xF0;
+            vt100->saved_tattr |= 0x0E;
+        }
+        else if (v >= 40 && v <= 47) {
+            vt100->saved_bgclr = v-40;
+        }
+        else if (v == 49) {
+            vt100->saved_bgclr = 0;
+        }
+        clog_debug(CLOG(0), "Proc SGR param %2d. bgcolor=%2d, tattr=%2d",
+            v, vt100->saved_bgclr, vt100->saved_tattr);
+    }
 }
 
 /*
@@ -908,6 +959,113 @@ static void vt100_write(struct lw_terminal *term_emul, char c)
     vt100->x += 1;
 }
 
+int ansi_chars_sz(struct lw_terminal_vt100 *vt100, unsigned int y)
+{
+    unsigned int col, sz;
+    unsigned char ca;
+
+    ca = vt100->tattrs[y][0];
+    sz = 132+18+2;
+    for (col=1; col<132; ++col) {
+        if (vt100->tattrs[y][col] != ca) {
+            sz += 13;
+            ca = vt100->tattrs[y][col];
+        }
+    }
+    return sz;
+}
+
+unsigned int ansi_bgcolor_convert(char *astr, unsigned int idx, unsigned char clr)
+{
+    char a[6];
+    unsigned int ansic;
+
+    ansic = (clr == 0)? 49: (clr+40);
+    sprintf(a, "\033[%2dm", ansic);
+    memcpy(astr+idx, a, strlen(a));
+    return idx + strlen(a);
+}
+
+unsigned int ansi_char_convert(char *astr, unsigned int idx, unsigned char attr)
+{
+    char a[14];
+    unsigned char color, fg, intense;
+
+    color = attr & 0x0F;
+    attr = attr>>4;
+    fg = 30 + ((color>>1) & 0x07);
+    intense = color & 0x01;
+
+    sprintf(a, "\033[%1d;%2d;", intense, fg);
+    if (attr != 0) {
+        if (attr & 0x04) {
+            strcat(a, "7;");
+        }
+        if (attr & 0x02) {
+            strcat(a, "4;");
+        }
+        if (attr & 0x01) {
+            strcat(a, "5;");
+        }
+    }
+    a[strlen(a)-1] = 'm';
+
+    memcpy(astr+idx, a, strlen(a));
+    return idx + strlen(a);
+}
+
+char *ansi_line_convert(struct lw_terminal_vt100 *vt100, unsigned int y)
+{
+    const char *line;
+    char *ansi;
+    unsigned int idx, col, sz;
+    unsigned char ca;
+
+    line = vt100->screen + SCREEN_PTR(vt100, 0, y);
+    sz = ansi_chars_sz(vt100, y);
+    ansi = malloc(sz);
+
+    idx = ansi_bgcolor_convert(ansi, 0, vt100->bgclr[y]);
+    ca = vt100->tattrs[y][0];
+    idx = ansi_char_convert(ansi, idx, ca);
+    for (col=0; col<vt100->width; ++col) {
+        if (vt100->tattrs[y][col] != ca) {
+            ca = vt100->tattrs[y][col];
+            if (col > 0 || ca != 0)
+                idx = ansi_char_convert(ansi, idx, ca);
+        }
+        ansi[idx++] = line[col];
+    }
+
+    ansi[idx++] = '\n';
+    ansi[idx] = '\0';
+    return ansi;
+}
+
+const char **lw_terminal_vt100_getanslines(struct lw_terminal_vt100 *vt100)
+{
+    unsigned int y;
+    const char *frozen;
+
+    pthread_mutex_lock(&vt100->mutex);
+
+    lw_terminal_vt100_getattrs(vt100);
+
+    for (y = 0; y < vt100->height; ++y) {
+        if (y < vt100->margin_top || y > vt100->margin_bottom) {
+            frozen = vt100->frozen_screen + FROZEN_SCREEN_PTR(vt100, 0, y);
+            vt100->lines[y] = malloc(132);
+            memcpy(vt100->lines[y], frozen, vt100->width);
+        }
+        else {
+            vt100->lines[y] = ansi_line_convert(vt100, y);
+        }
+    }
+
+    pthread_mutex_unlock(&vt100->mutex);
+    return (const char **)vt100->lines;
+}
+
 const char **lw_terminal_vt100_getlines(struct lw_terminal_vt100 *vt100)
 {
     unsigned int y;
@@ -922,6 +1080,19 @@ const char **lw_terminal_vt100_getlines(struct lw_terminal_vt100 *vt100)
     return (const char **)vt100->lines;
 }
 
+const char **lw_terminal_vt100_getattrs(struct lw_terminal_vt100 *vt100)
+{
+    unsigned int y;
+
+    pthread_mutex_lock(&vt100->mutex);
+    for (y = 0; y < vt100->height; ++y) {
+        if (y >= vt100->margin_top && y <= vt100->margin_bottom)
+            vt100->tattrs[y] = vt100->tattrinfo + SCREEN_PTR(vt100, 0, y);
+    }
+    pthread_mutex_unlock(&vt100->mutex);
+    return (const char **)vt100->tattrs;
+}
+
 struct lw_terminal_vt100 *lw_terminal_vt100_init(void *user_data,
                                      void (*unimplemented)(struct lw_terminal* term_emul, char *seq, char chr))
 {
@@ -934,6 +1105,7 @@ struct lw_terminal_vt100 *lw_terminal_vt100_init(void *user_data,
     this->height = 24;
     this->width = 80;
     this->screen = malloc(132 * SCROLLBACK * this->height);
+    this->tattrinfo = malloc(132 * SCROLLBACK * this->height);
     if (this->screen == NULL)
         goto free_this;
     memset(this->screen, ' ', 132 * SCROLLBACK * this->height);
@@ -941,9 +1113,14 @@ struct lw_terminal_vt100 *lw_terminal_vt100_init(void *user_data,
     if (this->frozen_screen == NULL)
         goto free_screen;
     memset(this->frozen_screen, ' ', 132 * this->height);
+    this->saved_bgclr = 0;
+    if (this->tattrinfo == NULL)
+        goto free_frozen_screen;
+    memset(this->tattrinfo, 0x0E, 132 * SCROLLBACK * this->height);
+    this->saved_tattr = 0x0E;
     this->tabulations = malloc(132);
     if (this->tabulations == NULL)
-        goto free_frozen_screen;
+        goto free_tattrinfo;
     if (this->tabulations == NULL)
         return NULL;
     this->margin_top = 0;
@@ -983,6 +1160,8 @@ struct lw_terminal_vt100 *lw_terminal_vt100_init(void *user_data,
     return this;
 free_tabulations:
     free(this->tabulations);
+free_tattrinfo:
+    free(this->tattrinfo);
 free_frozen_screen:
     free(this->frozen_screen);
 free_screen:
@@ -1004,5 +1183,6 @@ void lw_terminal_vt100_destroy(struct lw_terminal_vt100 *this)
     lw_terminal_parser_destroy(this->lw_terminal);
     free(this->screen);
     free(this->frozen_screen);
+    free(this->tattrinfo);
     free(this);
 }

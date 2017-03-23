@@ -139,13 +139,20 @@ const char **vt100_headless_getlines(struct vt100_headless *this)
     return lw_terminal_vt100_getlines(this->term);
 }
 
+const char **vt100_headless_getanslines(struct vt100_headless *this)
+{
+    return lw_terminal_vt100_getanslines(this->term);
+}
+
 void vt100_headless_fork(struct vt100_headless *this,
+                         const char *terms,
                          const char *progname,
                          char **argv)
 {
     int child;
     struct winsize winsize;
-
+    char terminfo[40];
+    
     set_non_canonical(this, 0);
     winsize.ws_row = 24;
     winsize.ws_col = 80;
@@ -153,7 +160,9 @@ void vt100_headless_fork(struct vt100_headless *this,
     if (child == CHILD)
     {
         setsid();
-        putenv("TERM=vt100");
+        if (terms == NULL) terms = "vt100";
+        sprintf(terminfo, "TERM=%s", terms);
+        putenv(terminfo);
         execvp(progname, argv);
         return ;
     }
